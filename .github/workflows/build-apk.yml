@@ -1,0 +1,76 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Generate native Android project
+        env:
+          CI: "1"
+        run: npx expo prebuild --platform android --non-interactive
+
+      - name: Configure arm64 release signing
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          gradle = Path("android/app/build.gradle")
+          text = gradle.read_text()
+          chunk = text.split("release {", 1)[-1][:500]
+          if "signingConfig signingConfigs.debug" not in chunk:
+              text = text.replace(
+                  "        release {",
+                  "        release {\n            signingConfig signingConfigs.debug",
+                  1,
+              )
+              gradle.write_text(text)
+          props = Path("android/gradle.properties")
+          content = props.read_text()
+          lines = [
+              "reactNativeArchitectures=arm64-v8a",
+              "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m",
+              "org.gradle.daemon=false",
+          ]
+          for line in lines:
+              key = line.split("=", 1)[0]
+              content = "\n".join(
+                  existing for existing in content.splitlines() if not existing.startswith(key + "=")
+              )
+              content += "\n" + line
+          props.write_text(content.strip() + "\n")
+          PY
+
+      - name: Assemble release APK
+        working-directory: android
+        env:
+          CI: "1"
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a --max-workers=2
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DotaCompanion
+          path: android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
